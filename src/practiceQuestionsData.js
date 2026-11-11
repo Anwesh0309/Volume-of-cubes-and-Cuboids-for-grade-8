@@ -1029,3 +1029,4 @@ export function getPracticeQuestion(worldIndex, questionIndex = 0) {
   const idx = worldIndex * 10 + questionIndex;
   return PRACTICE_QUESTIONS[idx] || PRACTICE_QUESTIONS[0];
 }
+

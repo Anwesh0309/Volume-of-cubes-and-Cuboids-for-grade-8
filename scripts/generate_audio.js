@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { ALL_PHRASES } from '../src/utils/lessonScript.js';
+import { ALL_PHRASES, FEEDBACK } from '../src/utils/lessonScript.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT_DIR = path.join(ROOT, 'public', 'assets', 'audio');
@@ -136,25 +136,38 @@ async function main() {
     return true;
   });
 
-  console.log(`Starting audio generation for ${phrases.length} unique phrases...`);
+  const feedbackSet = new Set(Object.values(FEEDBACK));
+  // Sort so FEEDBACK lines (correct, not quite, try again, etc.) are generated first
+  const sortedPhrases = [...phrases].sort((a, b) => {
+    const fa = feedbackSet.has(a.text) ? 0 : 1;
+    const fb = feedbackSet.has(b.text) ? 0 : 1;
+    return fa - fb;
+  });
+
+  console.log(`Starting audio generation for ${sortedPhrases.length} unique phrases...`);
   const map = { ...existingMap };
   let made = 0, skipped = 0, failed = 0;
   let elevenLabsQuotaExceeded = false;
 
-  for (const [i, p] of phrases.entries()) {
+  for (const [i, p] of sortedPhrases.entries()) {
     const hash = crypto.createHash('md5').update(p.text).digest('hex').slice(0, 8);
     const fileName = `audio_${slugify(p.text)}_${hash}.mp3`;
     const filePath = path.join(OUT_DIR, fileName);
     const publicPath = `/assets/audio/${fileName}`;
 
-    if (!force && fs.existsSync(filePath) && fs.statSync(filePath).size > 1000) {
+    const fileExists = fs.existsSync(filePath) && fs.statSync(filePath).size > 1000;
+    const isElevenLabs = fileExists && fs.readFileSync(filePath).includes(Buffer.from('Lavf'));
+
+    // Reuse existing file ONLY if it is already an authentic ElevenLabs audio
+    if (!force && isElevenLabs) {
       map[p.text] = publicPath;
       skipped++;
       continue;
     }
 
     const spoken = toSpokenText(p.text);
-    process.stdout.write(`[${i + 1}/${phrases.length}] (${p.style}) ${p.text.slice(0, 50)}... `);
+    const tag = feedbackSet.has(p.text) ? '[FEEDBACK]' : '';
+    process.stdout.write(`[${i + 1}/${sortedPhrases.length}] ${tag} (${p.style}) ${p.text.slice(0, 45)}... `);
 
     let buf = null;
     let source = '';
@@ -165,13 +178,20 @@ async function main() {
         source = 'ElevenLabs';
       } catch (e) {
         if (e.message && (e.message.includes('quota_exceeded') || e.status === 401)) {
-          console.log(`[ElevenLabs quota limit reached (10,000 chars)]`);
+          console.log(`[ElevenLabs quota limit reached]`);
           elevenLabsQuotaExceeded = true;
+        } else {
+          console.log(`[ElevenLabs error: ${e.message?.slice(0, 60)}]`);
         }
       }
     }
 
     if (!buf) {
+      if (fileExists) {
+        map[p.text] = publicPath;
+        console.log(`(retained existing fallback)`);
+        continue;
+      }
       try {
         buf = await fetchFallbackAudio(spoken);
         source = 'HQ-TTS';
@@ -187,8 +207,8 @@ async function main() {
     made++;
     console.log(`✔ [${source}] (${(buf.length / 1024).toFixed(1)} KB)`);
 
-    if (made % 10 === 0) saveMap(map);
-    await sleep(200);
+    if (made % 5 === 0) saveMap(map);
+    await sleep(250);
   }
 
   saveMap(map);
